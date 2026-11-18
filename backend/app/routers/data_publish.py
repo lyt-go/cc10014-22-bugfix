@@ -92,6 +92,16 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     return ActionResult(ok=True, message=message, entry=entry)
 
 
+@router.get("/{entry_id}/quality-gate")
+def get_quality_gate(entry_id: int) -> dict:
+    """读取发布质量闸门：失败行与阻断状态来自同一条落库记录。"""
+    gate = service.get_gate(entry_id)
+    if gate is None:
+        return {"version_id": entry_id, "status": "未校验", "阻断": False,
+                "message": "该版本尚未执行质量闸门", "failed_rows": [], "rules": []}
+    return gate
+
+
 @router.get("/{entry_id}/data")
 def get_published_data(entry_id: int) -> dict[str, Any]:
     """返回发布版本关联的转换节点输出数据。"""

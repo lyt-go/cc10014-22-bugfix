@@ -3,7 +3,7 @@
     <header class="page-head">
       <div>
         <h2>数据发布管理</h2>
-        <p class="page-desc">维护发布版本的输入、执行约束与结果记录，为数据发布提供可验证的数据工程流程。</p>
+        <p class="page-desc">确认发布前执行质量闸门：阻断状态与失败行同一条记录落库，被阻断的版本不前进。</p>
       </div>
       <div class="page-actions">
         <button class="btn primary" data-testid="open-create" type="button" @click="openCreate">登记发布版本</button>
@@ -31,12 +31,19 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>质量闸门</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`" :data-status="String(row.status)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td>
+            <span v-if="row.quality_gate" :class="['gate-tag', row.quality_gate.status === '阻断' ? 'blocked' : 'passed']">
+              {{ row.quality_gate.status }}
+            </span>
+            <span v-else class="gate-meta">未校验</span>
+          </td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -48,13 +55,57 @@
             >
               {{ action }}
             </button>
+            <button class="link" type="button" :data-testid="`gate-${row.id}`" @click="openGate(row)">查看闸门</button>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无数据发布数据，可先登记发布版本</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无数据发布数据，可先登记发布版本</td>
         </tr>
       </tbody>
     </table>
+
+    <section v-if="gate" class="detail-panel" data-testid="publish-gate">
+      <header class="detail-head">
+        <div>
+          <h3>{{ gate.版本编号 }} · 质量闸门</h3>
+          <p class="page-desc">数据集 {{ gate.数据集名称 }} · 规则 {{ gate.rule_count ?? 0 }} 条 · 评估时间 {{ gate.evaluated_at || '—' }}</p>
+        </div>
+        <button class="btn ghost" type="button" data-testid="close-gate" @click="gate = null">关闭</button>
+      </header>
+
+      <div class="gate-banner" :class="gate.status === '阻断' ? 'blocked' : 'passed'" data-testid="gate-status">
+        <strong>{{ gate.status }}</strong>
+        <span>{{ gate.message }}</span>
+      </div>
+
+      <table class="data-table" v-if="gate.failed_rows?.length">
+        <thead>
+          <tr>
+            <th>规则编号</th>
+            <th>行号</th>
+            <th>字段值</th>
+            <th>命中表达式</th>
+            <th>阈值下界</th>
+            <th>阈值上界</th>
+            <th>失败原因</th>
+            <th>阻断级别</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in gate.failed_rows" :key="`${row.rule_id}-${row.row_index}`" data-testid="gate-failed-row">
+            <td>{{ row.rule_id }}</td>
+            <td>{{ row.row_index }}</td>
+            <td>{{ row.value === null || row.value === '' ? '（空）' : row.value }}</td>
+            <td>{{ row.expression || '—' }}</td>
+            <td>{{ row.threshold_lower === '' ? '—' : row.threshold_lower }}</td>
+            <td>{{ row.threshold_upper === '' ? '—' : row.threshold_upper }}</td>
+            <td class="error-text">{{ row.reason }}</td>
+            <td>{{ row.blocking_level }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p v-else class="page-desc" data-testid="gate-no-failed-row">本次闸门没有失败行。</p>
+    </section>
 
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate">
@@ -74,7 +125,7 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条数据发布记录</span>
-      <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
+      <span v-if="errorMessage" class="error-text" data-testid="error-message">{{ errorMessage }}</span>
     </footer>
   </section>
 </template>
@@ -84,7 +135,7 @@ import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
-type Row = Record<string, string | number | null>
+type Row = Record<string, any>
 
 const ENDPOINT = '/api/data_publish'
 const columns = ["版本编号", "数据集名称", "发布范围", "查询参数", "响应字段", "缓存秒数", "分页上限", "消费应用"]
@@ -100,10 +151,11 @@ const filterFields = columns.slice(0, 3)
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
+const gate = ref<Row | null>(null)
 const stats = computed(() => [
   { label: metricNames[0], value: total.value },
   { label: metricNames[1], value: rows.value.filter((row) => row.status === statuses[1]).length },
-  { label: metricNames[2], value: rows.value.filter((row) => row.status === statuses[statuses.length - 1]).length },
+  { label: metricNames[2], value: rows.value.filter((row) => row.status === statuses[2]).length },
 ])
 
 function resetFilters() {
@@ -159,12 +211,26 @@ async function runAction(action: string, row: Row) {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
-    if (!response.ok) {
-      throw new Error('数据发布动作未生效，请稍后重试')
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok || payload.ok === false) {
+      throw new Error(payload.message || '数据发布动作未生效，请稍后重试')
     }
     await reload()
+    if (action === '确认发布') await openGate(row)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '数据发布操作失败'
+    if (action === '确认发布') await openGate(row)
+  }
+}
+
+async function openGate(row: Row) {
+  errorMessage.value = ''
+  try {
+    const response = await request(`${ENDPOINT}/${row.id}/quality-gate`)
+    if (!response.ok) throw new Error('质量闸门读取失败')
+    gate.value = await response.json()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '质量闸门读取失败'
   }
 }
 
@@ -186,3 +252,16 @@ async function reload() {
 
 onMounted(reload)
 </script>
+
+<style scoped>
+.gate-tag { display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 12px; }
+.gate-tag.blocked { background: #fef3f2; color: #b42318; border: 1px solid #fda29b; }
+.gate-tag.passed { background: #ecfdf3; color: #067647; border: 1px solid #a6f4c5; }
+.gate-meta { color: var(--muted); font-size: 12px; }
+.detail-panel { margin-top: 16px; background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+.detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.detail-panel h3 { margin: 0 0 4px; font-size: 15px; }
+.gate-banner { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 6px; font-size: 13px; margin: 10px 0; }
+.gate-banner.blocked { background: #fef3f2; border: 1px solid #fda29b; color: #b42318; }
+.gate-banner.passed { background: #ecfdf3; border: 1px solid #a6f4c5; color: #067647; }
+</style>

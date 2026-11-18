@@ -257,3 +257,23 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
          "保留天数": "365", "恢复超时": "3600"},
     ],
 }
+
+# 模拟表数据：起服务后即可从质量稽核列表发起执行并看到真实失败行。
+# 其中包含非法数值（非数字、空白），用于验证它们不会被当成 0 通过下界校验。
+SEED_TABLE_ROWS: dict[str, list[dict[str, Any]]] = {
+    "ods_orders": [
+        {"order_id": "O001", "order_amount": "120.00", "order_status": "已完成", "dt": "2026-11-01"},
+        {"order_id": "O002", "order_amount": "-10.00", "order_status": "已完成", "dt": "2026-11-01"},
+        {"order_id": "O003", "order_amount": "abc", "order_status": "已完成", "dt": "2026-11-01"},
+        {"order_id": "O004", "order_amount": "", "order_status": "待支付", "dt": "2026-11-01"},
+        {"order_id": "O005", "order_amount": "999999.00", "order_status": "已完成", "dt": "2026-11-01"},
+    ],
+    "ods_payments": [
+        {"pay_id": "P001", "pay_amount": "88.00", "pay_time": "2026-11-01T10:00:00", "dt": "2026-11-01"},
+        {"pay_id": "P002", "pay_amount": "1000000.00", "pay_time": "2026-11-01T11:00:00", "dt": "2026-11-01"},
+    ],
+    "ods_users": [
+        {"user_id": "U001", "register_time": "2026-01-01T00:00:00", "user_level": "VIP", "dt": "2026-11-01"},
+        {"user_id": "U002", "register_time": "2026-01-02T00:00:00", "user_level": "非法值", "dt": "2026-11-01"},
+    ],
+}

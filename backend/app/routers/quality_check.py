@@ -7,7 +7,7 @@ import io
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
+from app.schemas import ActionPayload, ActionResult, PageResult
 from app.services.quality_check import QualityCheckService
 
 router = APIRouter(prefix="/api/quality_check", tags=["质量稽核"])
@@ -65,6 +65,23 @@ def export_entries(
         headers={"Content-Disposition": 'attachment; filename="quality_check.csv"'})
 
 
+@router.get("/results", response_model=PageResult[dict])
+def list_results(
+    keyword: str | None = Query(default=None, description="按规则编号检索"),
+    status: str | None = Query(default=None, description="完成、中断、无数据、配置错误"),
+    blocking_level: str | None = Query(default=None, description="阻断、告警、非阻断"),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=200),
+) -> PageResult[dict]:
+    """质量稽核结果列表：与详情共用批次排序，错序批次不会显示成旧值。
+
+    必须声明在 /{entry_id} 之前，否则 "results" 会被当成 entry_id。
+    """
+    items, total = service.list_results(
+        keyword=keyword, status=status, blocking_level=blocking_level, page=page, size=size)
+    return PageResult(items=items, total=total, page=page, size=size)
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条稽核规则明细；不存在时给出可读的错误说明。"""
@@ -72,6 +89,25 @@ def get_entry(entry_id: int) -> dict:
     if entry is None:
         raise HTTPException(status_code=404, detail=f"稽核规则 {entry_id} 不存在或已归档")
     return entry
+
+
+@router.get("/{entry_id}/results", response_model=dict)
+def result_detail(entry_id: int) -> dict:
+    """质量稽核结果详情：列出各批次结果、当前有效结果、失败行、表达式与阈值边界。"""
+    detail = service.result_detail(entry_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"稽核规则 {entry_id} 不存在或已归档")
+    return detail
+
+
+@router.post("/{entry_id}/execute")
+def execute_check(
+    entry_id: int,
+    batch: str | None = Query(default=None, description="数据批次；不传取规则配置或全量"),
+    restart: bool = Query(default=False, description="中断后是否从头重跑，默认只续写未完成部分"),
+) -> dict:
+    """执行稽核规则：读取目标表数据，运行校验表达式并落库失败行与阈值边界。"""
+    return service.execute_check(entry_id, batch=batch, restart=restart)
 
 
 @router.post("", response_model=ActionResult)
@@ -90,10 +126,3 @@ def run_action(entry_id: int, payload: ActionPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.post("/{entry_id}/execute")
-def execute_check(entry_id: int) -> dict[str, Any]:
-    """执行稽核规则：读取目标表数据，运行校验表达式。"""
-    result = service.execute_check(entry_id)
-    return result
